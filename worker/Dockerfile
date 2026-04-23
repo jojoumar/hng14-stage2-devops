@@ -1,5 +1,7 @@
 # -------- Stage 1: Build --------
-FROM python:3.12-slim AS builder
+FROM python:3.12-slim-bookworm AS builder
+
+RUN apt-get update && apt-get upgrade -y && apt-get clean
 
 WORKDIR /app
 

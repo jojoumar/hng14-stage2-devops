@@ -1,6 +1,8 @@
 # -------- Stage 1: Build --------
 FROM node:18-alpine AS builder
 
+RUN apt-get update && apt-get upgrade -y && apt-get clean
+
 WORKDIR /app
 
 COPY package*.json ./
