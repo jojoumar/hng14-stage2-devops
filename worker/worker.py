@@ -22,4 +22,3 @@ while True:
         _, job_id = job
         process_job(job_id.decode())
 
-        
