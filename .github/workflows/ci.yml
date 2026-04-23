@@ -133,47 +133,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set tag
-        run: echo "TAG=${GITHUB_SHA}" >> $GITHUB_ENV
-
-    # Pull images from local registry
-      - name: Pull images
+      - name: Pull images from local registry
         run: |
-          docker pull localhost:5000/api:$TAG
-          docker pull localhost:5000/worker:$TAG
-          docker pull localhost:5000/frontend:$TAG
+          docker pull localhost:5000/api:latest
+          docker pull localhost:5000/worker:latest
+          docker pull localhost:5000/frontend:latest
 
-      - name: Build images again
-        run: |
-          docker build -t api:${{ env.TAG }} ./api
-          docker build -t worker:${{ env.TAG }} ./worker
-          docker build -t frontend:${{ env.TAG }} ./frontend
-
-    # Scan API
-      - name: Scan API image
+      - name: Run Trivy scan (API)
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: api:${{ env.TAG }}
+          image-ref: localhost:5000/api:latest
           format: sarif
           output: trivy-api.sarif
           severity: CRITICAL
           exit-code: 1
 
-    # Scan Worker
-      - name: Scan Worker image
+      - name: Run Trivy scan (Worker)
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: localhost:5000/worker:${{ env.TAG }}
+          image-ref: localhost:5000/worker:latest
           format: sarif
           output: trivy-worker.sarif
           severity: CRITICAL
           exit-code: 1
 
-    # Scan Frontend
-      - name: Scan Frontend image
+      - name: Run Trivy scan (Frontend)
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: localhost:5000/frontend:${{ env.TAG }}
+          image-ref: localhost:5000/frontend:latest
           format: sarif
           output: trivy-frontend.sarif
           severity: CRITICAL

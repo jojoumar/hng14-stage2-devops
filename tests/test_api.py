@@ -1,24 +1,23 @@
 from fastapi.testclient import TestClient
-from api.main import app
+from api.main import app, get_redis
 import fakeredis
-import api.main
 
-# mock Redis
-api.main.r = fakeredis.FakeRedis()
+def override_redis():
+    return fakeredis.FakeRedis()
+
+app.dependency_overrides[get_redis] = override_redis
 
 client = TestClient(app)
-
 
 def test_create_job():
     response = client.post("/jobs")
     assert response.status_code == 200
     assert "job_id" in response.json()
 
-
 def test_get_job_not_found():
     response = client.get("/jobs/invalid")
     assert response.status_code == 200
-
+    assert response.json()["error"] == "not found"
 
 def test_health():
     response = client.get("/health")
