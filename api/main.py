@@ -6,6 +6,7 @@ import os
 
 app = FastAPI()
 
+
 r = redis.Redis(
     host=os.getenv("REDIS_HOST", "localhost"),
     port=int(os.getenv("REDIS_PORT", 6379))
@@ -36,4 +37,3 @@ def root():
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
