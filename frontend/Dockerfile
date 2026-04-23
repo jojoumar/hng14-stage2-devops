@@ -14,14 +14,14 @@ FROM node:18-alpine
 WORKDIR /app
 
 # Create non-root user
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+RUN addgroup -S appgroup \
+    && adduser -S appuser -G appgroup \
+    && apk add --no-cache wget
 
 COPY --from=builder /app /app
 
 # Change ownership
 RUN chown -R appuser:appgroup /app
-
-RUN apk add --no-cache wget
 
 USER appuser
 
