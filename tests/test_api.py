@@ -1,10 +1,10 @@
 from fastapi.testclient import TestClient
-from api.main import app, get_redis
+from api.main import app
 import fakeredis
+import api.main
 
 # mock Redis
-fake_redis = fakeredis.FakeRedis()
-app.dependency_overrides[get_redis] = lambda: fake_redis
+api.main.r = fakeredis.FakeRedis()
 
 client = TestClient(app)
 

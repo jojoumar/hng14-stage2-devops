@@ -14,16 +14,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Python lint
-      - name: Install flake8
-        run: pip install flake8
+      # Python
+      - run: pip install flake8
+      - run: flake8 api worker --exclude=__pycache__,*/site-packages/*
 
-      - name: Lint Python
-        run: flake8 api worker
-
-      # JS lint
-      - name: Install Node + eslint
-        uses: actions/setup-node@v4
+      # JS
+      - uses: actions/setup-node@v4
         with:
           node-version: 18
 
@@ -31,24 +27,22 @@ jobs:
           cd frontend
           npm install
           npm install eslint@8
+          echo 'module.exports = {env:{node:true,es2021:true},extends:"eslint:recommended"};' > .eslintrc.cjs
           npx eslint .
 
-      # Docker lint
-      - name: Hadolint API Dockerfile
-        uses: hadolint/hadolint-action@v3.1.0
+      # Docker
+      - uses: hadolint/hadolint-action@v3.1.0
         with:
-            dockerfile: api/Dockerfile
-            
-      - name: Hadolint Worker Dockerfile
-        uses: hadolint/hadolint-action@v3.1.0
-        with:
-            dockerfile: worker/Dockerfile
+          dockerfile: api/Dockerfile
 
-      - name: Hadolint Frontend Dockerfile
-        uses: hadolint/hadolint-action@v3.1.0
+      - uses: hadolint/hadolint-action@v3.1.0
         with:
-            dockerfile: frontend/Dockerfile
-            ignore: DL3018
+          dockerfile: worker/Dockerfile
+
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: frontend/Dockerfile
+          ignore: DL3018
 
 
 # ---------------- TEST ----------------
@@ -59,24 +53,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install API dependencies
-        run: |
-          pip install -r api/requirements-dev.txt
+      - run: |
+          pip install -r api/requirements.txt
+          pip install pytest pytest-cov fakeredis httpx
 
-      - name: Install deps
-        run: |
-          pip install pytest pytest-cov fakeredis
-
-      - name: Run tests
-        run: |
-          pytest --cov=api --cov-report=xml
+      - run: pytest --cov=api --cov-report=xml
         env:
           PYTHONPATH: .
 
-      - name: Upload coverage
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: coverage-report
+          name: coverage
           path: coverage.xml
 
 
@@ -94,23 +81,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set tag
-        run: echo "TAG=${GITHUB_SHA}" >> $GITHUB_ENV
+      - run: echo "TAG=${GITHUB_SHA}" >> $GITHUB_ENV
 
-      - name: Build images
-        run: |
+      - run: |
           docker build -t localhost:5000/api:$TAG ./api
           docker build -t localhost:5000/worker:$TAG ./worker
           docker build -t localhost:5000/frontend:$TAG ./frontend
 
-      - name: Tag latest
-        run: |
           docker tag localhost:5000/api:$TAG localhost:5000/api:latest
           docker tag localhost:5000/worker:$TAG localhost:5000/worker:latest
           docker tag localhost:5000/frontend:$TAG localhost:5000/frontend:latest
 
-      - name: Push images
-        run: |
           docker push localhost:5000/api:$TAG
           docker push localhost:5000/api:latest
           docker push localhost:5000/worker:$TAG
@@ -124,24 +105,34 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
 
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Trivy
-        uses: aquasecurity/trivy-action@master
+      # Pull images from local registry
+      - run: |
+          docker pull localhost:5000/api:latest
+          docker pull localhost:5000/worker:latest
+          docker pull localhost:5000/frontend:latest
+
+      # Scan API (strict requirement: fail on CRITICAL)
+      - uses: aquasecurity/trivy-action@master
         with:
-          scan-type: image
-          image-ref: api:latest
+          image-ref: localhost:5000/api:latest
           format: sarif
-          output: trivy-api.sarif
+          output: trivy.sarif
           severity: CRITICAL
           exit-code: 1
 
-      - name: Upload SARIF
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: trivy-results
-          path: "*.sarif"
+          name: trivy-report
+          path: trivy.sarif
 
 
 # ---------------- INTEGRATION ----------------
@@ -152,36 +143,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Start stack
-        run: docker compose up -d --build
+      - run: docker compose up -d --build
 
-      - name: Wait for API
-        run: |
+      - run: |
           for i in {1..30}; do
             curl -f http://localhost:8000/health && break
             sleep 2
           done
 
-      - name: Submit job
-        run: |
-          JOB_ID=$(curl -s -X POST http://localhost:8000/jobs | jq -r .job_id)
+      - run: |
+          JOB_ID=$(curl -s -X POST http://localhost:3000/submit | jq -r .job_id)
           echo "JOB_ID=$JOB_ID" >> $GITHUB_ENV
 
-      - name: Poll job
-        run: |
+      - run: |
           for i in {1..30}; do
-            STATUS=$(curl -s http://localhost:8000/jobs/$JOB_ID | jq -r .status)
+            STATUS=$(curl -s http://localhost:3000/status/$JOB_ID | jq -r .status)
             if [ "$STATUS" = "completed" ]; then
-              echo "Job completed"
               exit 0
             fi
             sleep 2
           done
-          echo "Job did not complete"
           exit 1
 
-      - name: Tear down
-        if: always()
+      - if: always()
         run: docker compose down
 
 
@@ -194,18 +178,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Deploy (rolling update simulation)
-        run: |
+      - run: |
           docker compose up -d --build
 
-          echo "Waiting for health..."
           for i in {1..30}; do
             if curl -f http://localhost:8000/health; then
-              echo "Healthy"
               exit 0
             fi
             sleep 2
           done
 
-          echo "Health check failed"
           exit 1
