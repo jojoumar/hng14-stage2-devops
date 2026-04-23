@@ -14,12 +14,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Python
-      - run: pip install flake8
-      - run: flake8 api worker --exclude=__pycache__,*/site-packages/*
+      # Python lint
+      - name: Install flake8
+        run: pip install flake8
 
-      # JS
-      - uses: actions/setup-node@v4
+      - name: Lint Python
+        run: flake8 api worker
+
+      # JS lint
+      - name: Install Node + eslint
+        uses: actions/setup-node@v4
         with:
           node-version: 18
 
@@ -27,22 +31,24 @@ jobs:
           cd frontend
           npm install
           npm install eslint@8
-          echo 'module.exports = {env:{node:true,es2021:true},extends:"eslint:recommended"};' > .eslintrc.cjs
           npx eslint .
 
-      # Docker
-      - uses: hadolint/hadolint-action@v3.1.0
+      # Docker lint
+      - name: Hadolint API Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
         with:
-          dockerfile: api/Dockerfile
+            dockerfile: api/Dockerfile
+            
+      - name: Hadolint Worker Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+            dockerfile: worker/Dockerfile
 
-      - uses: hadolint/hadolint-action@v3.1.0
+      - name: Hadolint Frontend Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
         with:
-          dockerfile: worker/Dockerfile
-
-      - uses: hadolint/hadolint-action@v3.1.0
-        with:
-          dockerfile: frontend/Dockerfile
-          ignore: DL3018
+            dockerfile: frontend/Dockerfile
+            ignore: DL3018
 
 
 # ---------------- TEST ----------------
@@ -53,17 +59,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - run: |
-          pip install -r api/requirements.txt
-          pip install pytest pytest-cov fakeredis httpx
+      - name: Install API dependencies
+        run: |
+          pip install -r api/requirements-dev.txt
 
-      - run: pytest --cov=api --cov-report=xml
+      - name: Install deps
+        run: |
+          pip install pytest pytest-cov fakeredis
+
+      - name: Run tests
+        run: |
+          pytest --cov=api --cov-report=xml
         env:
           PYTHONPATH: .
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
         with:
-          name: coverage
+          name: coverage-report
           path: coverage.xml
 
 
@@ -81,17 +94,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - run: echo "TAG=${GITHUB_SHA}" >> $GITHUB_ENV
+      - name: Set tag
+        run: echo "TAG=${GITHUB_SHA}" >> $GITHUB_ENV
 
-      - run: |
+      - name: Build images
+        run: |
           docker build -t localhost:5000/api:$TAG ./api
           docker build -t localhost:5000/worker:$TAG ./worker
           docker build -t localhost:5000/frontend:$TAG ./frontend
 
+      - name: Tag latest
+        run: |
           docker tag localhost:5000/api:$TAG localhost:5000/api:latest
           docker tag localhost:5000/worker:$TAG localhost:5000/worker:latest
           docker tag localhost:5000/frontend:$TAG localhost:5000/frontend:latest
 
+      - name: Push images
+        run: |
           docker push localhost:5000/api:$TAG
           docker push localhost:5000/api:latest
           docker push localhost:5000/worker:$TAG
@@ -101,38 +120,70 @@ jobs:
 
 
 # ---------------- SECURITY ----------------
-  security:
-    runs-on: ubuntu-latest
-    needs: build
+security:
+  runs-on: ubuntu-latest
+  needs: build
 
-    services:
-      registry:
-        image: registry:2
-        ports:
-          - 5000:5000
+  services:
+    registry:
+      image: registry:2
+      ports:
+        - 5000:5000
 
-    steps:
-      - uses: actions/checkout@v4
+  steps:
+    - uses: actions/checkout@v4
 
-      # Pull images from local registry
-      - run: |
-          docker pull localhost:5000/api:latest
-          docker pull localhost:5000/worker:latest
-          docker pull localhost:5000/frontend:latest
+    - name: Set tag
+      run: echo "TAG=${GITHUB_SHA}" >> $GITHUB_ENV
 
-      # Scan API (strict requirement: fail on CRITICAL)
-      - uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: localhost:5000/api:latest
-          format: sarif
-          output: trivy.sarif
-          severity: CRITICAL
-          exit-code: 1
+    # Pull images from local registry
+    - name: Pull images
+      run: |
+        docker pull localhost:5000/api:$TAG
+        docker pull localhost:5000/worker:$TAG
+        docker pull localhost:5000/frontend:$TAG
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: trivy-report
-          path: trivy.sarif
+    - name: Build images again
+      run: |
+        docker build -t api:${{ env.TAG }} ./api
+        docker build -t worker:${{ env.TAG }} ./worker
+        docker build -t frontend:${{ env.TAG }} ./frontend
+
+    # Scan API
+    - name: Scan API image
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: localhost:5000/api:${{ env.TAG }}
+        format: sarif
+        output: trivy-api.sarif
+        severity: CRITICAL
+        exit-code: 1
+
+    # Scan Worker
+    - name: Scan Worker image
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: localhost:5000/worker:${{ env.TAG }}
+        format: sarif
+        output: trivy-worker.sarif
+        severity: CRITICAL
+        exit-code: 1
+
+    # Scan Frontend
+    - name: Scan Frontend image
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: localhost:5000/frontend:${{ env.TAG }}
+        format: sarif
+        output: trivy-frontend.sarif
+        severity: CRITICAL
+        exit-code: 1
+
+    - name: Upload SARIF
+      uses: actions/upload-artifact@v4
+      with:
+        name: trivy-results
+        path: "*.sarif"
 
 
 # ---------------- INTEGRATION ----------------
@@ -143,19 +194,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - run: docker compose up -d --build
+      - name: Start stack
+        run: docker compose up -d --build
 
-      - run: |
+      - name: Wait for frontend
+        run: |
           for i in {1..30}; do
-            curl -f http://localhost:8000/health && break
+            curl -f http://localhost:3000 && break
             sleep 2
           done
 
-      - run: |
+      - name: Submit job via frontend
+        run: |
           JOB_ID=$(curl -s -X POST http://localhost:3000/submit | jq -r .job_id)
           echo "JOB_ID=$JOB_ID" >> $GITHUB_ENV
 
-      - run: |
+      - name: Poll job status
+        run: |
           for i in {1..30}; do
             STATUS=$(curl -s http://localhost:3000/status/$JOB_ID | jq -r .status)
             if [ "$STATUS" = "completed" ]; then
@@ -165,8 +220,9 @@ jobs:
           done
           exit 1
 
-      - if: always()
-        run: docker compose down
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
 
 
 # ---------------- DEPLOY ----------------
@@ -178,14 +234,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - run: |
-          docker compose up -d --build
+      - name: Rolling update
+        run: |
+          docker compose up -d
 
-          for i in {1..30}; do
-            if curl -f http://localhost:8000/health; then
+          docker run -d --name new_api -p 8001:8000 api:latest
+
+          echo "Waiting for health..."
+
+          for i in {1..12}; do
+            if curl -f http://localhost:8001/health; then
+              echo "Healthy"
+              docker stop api || true
+              docker rm api || true
+              docker rename new_api api
               exit 0
             fi
-            sleep 2
+            sleep 5
           done
 
+          echo "Health failed — keeping old container"
+          docker stop new_api || true
+          docker rm new_api || true
           exit 1
