@@ -1,0 +1,197 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "*" ]
+  pull_request:
+
+jobs:
+
+# ---------------- LINT ----------------
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Python lint
+      - name: Install flake8
+        run: pip install flake8
+
+      - name: Lint Python
+        run: flake8 api worker
+
+      # JS lint
+      - name: Install Node + eslint
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - run: |
+          cd frontend
+          npm install
+          npm install eslint
+          npx eslint .
+
+      # Docker lint
+      - name: Hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: |
+            api/Dockerfile
+            worker/Dockerfile
+            frontend/Dockerfile
+
+
+# ---------------- TEST ----------------
+  test:
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          pip install pytest pytest-cov fakeredis
+
+      - name: Run tests
+        run: |
+          pytest --cov=api --cov-report=xml
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+
+# ---------------- BUILD ----------------
+  build:
+    runs-on: ubuntu-latest
+    needs: test
+
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set tag
+        run: echo "TAG=${GITHUB_SHA}" >> $GITHUB_ENV
+
+      - name: Build images
+        run: |
+          docker build -t localhost:5000/api:$TAG ./api
+          docker build -t localhost:5000/worker:$TAG ./worker
+          docker build -t localhost:5000/frontend:$TAG ./frontend
+
+      - name: Tag latest
+        run: |
+          docker tag localhost:5000/api:$TAG localhost:5000/api:latest
+          docker tag localhost:5000/worker:$TAG localhost:5000/worker:latest
+          docker tag localhost:5000/frontend:$TAG localhost:5000/frontend:latest
+
+      - name: Push images
+        run: |
+          docker push localhost:5000/api:$TAG
+          docker push localhost:5000/api:latest
+          docker push localhost:5000/worker:$TAG
+          docker push localhost:5000/worker:latest
+          docker push localhost:5000/frontend:$TAG
+          docker push localhost:5000/frontend:latest
+
+
+# ---------------- SECURITY ----------------
+  security:
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: image
+          image-ref: api:latest
+          format: sarif
+          output: trivy-api.sarif
+          severity: CRITICAL
+          exit-code: 1
+
+      - name: Upload SARIF
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-results
+          path: "*.sarif"
+
+
+# ---------------- INTEGRATION ----------------
+  integration:
+    runs-on: ubuntu-latest
+    needs: security
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start stack
+        run: docker compose up -d --build
+
+      - name: Wait for API
+        run: |
+          for i in {1..30}; do
+            curl -f http://localhost:8000/health && break
+            sleep 2
+          done
+
+      - name: Submit job
+        run: |
+          JOB_ID=$(curl -s -X POST http://localhost:8000/jobs | jq -r .job_id)
+          echo "JOB_ID=$JOB_ID" >> $GITHUB_ENV
+
+      - name: Poll job
+        run: |
+          for i in {1..30}; do
+            STATUS=$(curl -s http://localhost:8000/jobs/$JOB_ID | jq -r .status)
+            if [ "$STATUS" = "completed" ]; then
+              echo "Job completed"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Job did not complete"
+          exit 1
+
+      - name: Tear down
+        if: always()
+        run: docker compose down
+
+
+# ---------------- DEPLOY ----------------
+  deploy:
+    runs-on: ubuntu-latest
+    needs: integration
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy (rolling update simulation)
+        run: |
+          docker compose up -d --build
+
+          echo "Waiting for health..."
+          for i in {1..30}; do
+            if curl -f http://localhost:8000/health; then
+              echo "Healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "Health check failed"
+          exit 1
